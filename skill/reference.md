@@ -52,7 +52,7 @@ approach that faithfully **re‑themes** a captured screen for both light and da
 | `TERMCLIP_SETTLE_MS` | `500` | default wait before a capture |
 | `TERMCLIP_OUT` | `.` | output directory for `snap`/`shot` PNGs |
 | `TERMCLIP_SOCKET` | `termclip` | tmux server socket name (`-L`) |
-| `TERMCLIP_HOME` | `$TMPDIR/termclip` | per‑session state dir |
+| `TERMCLIP_HOME` | `${TMPDIR:-/tmp}/termclip` | per‑session state dir (`/tmp/termclip` if `TMPDIR` is unset, e.g. Linux) |
 
 Per‑call flags (`--cols`, `--rows`, `--theme`, `--settle`, `--out`) override the env.
 
@@ -108,5 +108,5 @@ and never send `Enter` on a "Save"/"Delete"/"Yes" confirmation unless you mean i
 
 ## Files & state
 - Sessions live on the `tmux -L termclip` server (separate from your tmux).
-- Per‑session state (geometry, last capture) is under `$TMPDIR/termclip/<name>/`.
+- Per‑session state (geometry, last capture) is under `${TMPDIR:-/tmp}/termclip/<name>/`.
 - `stop` removes the session and its state; `stop --all` kills the whole server.

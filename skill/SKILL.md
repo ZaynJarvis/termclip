@@ -65,6 +65,9 @@ After any `snap`/`shot`, **Read the printed `.dark.png` / `.light.png` paths** t
 
 ## Tips that matter
 - **Sessions persist** until you `stop` them. Always `stop` (or `stop --all`) when finished.
+- **`-s NAME`** names the session (default `main`). All sessions share one tmux server, so
+  use **distinct names** if you run more than one at a time. `stop --all` kills **every**
+  termclip session for your user — prefer `stop -s NAME` to stop just one.
 - **`--settle MS`** is the wait *before* capturing — give slow/animated TUIs time to redraw
   (use ~3000ms for a program's first screen if it probes a server/network).
 - **Geometry**: `--cols`/`--rows` set the terminal size. Tall TUIs need more rows (`--rows 40`);
@@ -78,6 +81,6 @@ After any `snap`/`shot`, **Read the printed `.dark.png` / `.light.png` paths** t
 - **Output dir** defaults to the current directory; set `TERMCLIP_OUT=some/dir`.
 
 ## Requirements
-`tmux` and `vhs` (required); `imagemagick`'s `magick`/`convert` (optional, used to trim).
+`tmux` ≥ 3.2 and `vhs` (required); `imagemagick`'s `magick`/`convert` (optional, used to trim).
 On macOS: `brew install tmux vhs imagemagick`. See `reference.md` for internals,
 all env knobs, and troubleshooting.

@@ -101,6 +101,8 @@ Every `snap`/`shot` prints the PNG paths it wrote — open them, or (for an agen
 - **`--cols` / `--rows`** — terminal geometry. Tall TUIs need more rows; the capture shows
   exactly what a terminal that size would show.
 - **`--theme dark|light|both`** — which theme(s) to render (default `both`).
+- **`-s NAME`** — session name (default `main`). Sessions share one tmux server, so use
+  distinct names for concurrent captures; `stop --all` kills every termclip session.
 
 ## Themes
 

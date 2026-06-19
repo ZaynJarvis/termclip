@@ -17,12 +17,16 @@
 #   termclip start  [-s NAME] [--cols N] [--rows N] -- <command...>
 #   termclip type   [-s NAME] "<text>"          # type literal text (no Enter)
 #   termclip key    [-s NAME] <Key> [Key...]    # send keys: Enter Up Down Escape C-c Tab ...
-#   termclip snap   [-s NAME] [NAME_OR_PREFIX] [--theme dark|light|both] [--settle MS]
+#   termclip snap   [-s NAME] [PREFIX] [--theme dark|light|both] [--settle MS]
 #   termclip shot   [--out PREFIX] [--cols N] [--rows N] [--settle MS] -- <command...>
 #   termclip render <file.ans> [--out PREFIX] [--theme ...] [--cols N] [--rows N]
 #   termclip ls
-#   termclip stop   [-s NAME]
+#   termclip stop   [-s NAME] | stop --all
 #   termclip help
+#
+# `-s NAME` is optional (default "main"). All sessions share one tmux server
+# socket, so use distinct names if you run more than one at a time; `stop --all`
+# kills EVERY termclip session for this user.
 #
 # Env overrides:
 #   TERMCLIP_DARK_THEME   (default "Catppuccin Mocha")   — any `vhs themes` name
@@ -31,10 +35,10 @@
 #   TERMCLIP_FONT_FAMILY  (default: VHS default, JetBrains Mono)
 #   TERMCLIP_PADDING      (default 24)
 #   TERMCLIP_COLS / TERMCLIP_ROWS  (default 100 / 30) — session geometry
-#   TERMCLIP_SETTLE_MS    (default 500) — wait after a key before capturing
+#   TERMCLIP_SETTLE_MS    (default 500) — wait before capturing
 #   TERMCLIP_OUT          (default ".") — directory for snap/shot output PNGs
 #   TERMCLIP_SOCKET       (default "termclip") — isolated tmux server socket
-#   TERMCLIP_HOME         (default "$TMPDIR/termclip") — session state dir
+#   TERMCLIP_HOME         (default "${TMPDIR:-/tmp}/termclip") — session state dir
 #
 set -euo pipefail
 
@@ -59,11 +63,37 @@ tmuxc() { tmux -L "$TC_SOCKET" "$@"; }
 die()   { printf 'termclip: %s\n' "$*" >&2; exit 1; }
 info()  { printf 'termclip: %s\n' "$*" >&2; }
 have()  { command -v "$1" >/dev/null 2>&1; }
-_sleep_ms() { perl -e "select(undef,undef,undef,$1/1000)" 2>/dev/null || sleep "$(awk "BEGIN{printf \"%.3f\", $1/1000}")"; }
 
+# require a value for an option flag: need_val "$#" "$1"
+need_val() { [ "$1" -ge 2 ] || die "option '$2' requires a value"; }
+
+# session name is also a filesystem path component and a tmux target — keep it safe
+valid_session() {
+  case "$1" in
+    ''|.|..|*[!A-Za-z0-9_.-]*) die "invalid session name '$1' (allowed: A-Za-z0-9_.-, no slashes)";;
+  esac
+}
+
+# sleep N milliseconds (integer); value validated and passed as data, never interpolated
+_sleep_ms() {
+  case "$1" in ''|*[!0-9]*) die "settle must be an integer number of ms: '$1'";; esac
+  perl -e 'select(undef,undef,undef,$ARGV[0]/1000)' "$1" 2>/dev/null \
+    || sleep "$(awk -v ms="$1" 'BEGIN{printf "%.3f", ms/1000}')"
+}
+
+ensure_tmux() { have tmux || die "missing dependency: tmux  (brew install tmux)"; }
+ensure_vhs()  { have vhs  || die "missing dependency: vhs   (brew install vhs)"; }
 ensure_core() {
-  have tmux || die "missing dependency: tmux  (brew install tmux)"
-  have vhs  || die "missing dependency: vhs   (brew install vhs)"
+  ensure_tmux; ensure_vhs
+  # `new-session -e` and `set -as terminal-features` need tmux >= 3.2
+  local maj min
+  maj="$(tmux -V 2>/dev/null | sed -E 's/[^0-9]*([0-9]+)\.([0-9]+).*/\1/')"
+  min="$(tmux -V 2>/dev/null | sed -E 's/[^0-9]*([0-9]+)\.([0-9]+).*/\2/')"
+  case "$maj" in ''|*[!0-9]*) maj=0;; esac
+  case "$min" in ''|*[!0-9]*) min=0;; esac
+  if [ "$maj" -lt 3 ] || { [ "$maj" -eq 3 ] && [ "$min" -lt 2 ]; }; then
+    die "tmux >= 3.2 required (found: $(tmux -V 2>/dev/null))"
+  fi
 }
 
 sdir()  { printf '%s/%s' "$TC_HOME" "$1"; }   # per-session state dir
@@ -91,7 +121,13 @@ render_ans() {
   # render_ans <ans_file> <out_png> <theme> <cols> <rows>
   local ans="$1" out="$2" theme="$3" cols="$4" rows="$5"
   [ -f "$ans" ] || die "render: no such ANSI file: $ans"
-  case "$ans" in *" "*) die "render: ANSI path must not contain spaces: $ans";; esac
+
+  # All scratch lives in one dir with a script-controlled (metachar-free) name.
+  # The captured grid is copied here and the COPY's safe path is what gets cat'd
+  # inside the replay shell, so a crafted input filename can't inject commands.
+  local scratch; scratch="$(mktemp -d "${TMPDIR:-/tmp}/termclip.XXXXXX")"
+  local grid="$scratch/grid.ans" trash="$scratch/rec.gif" tape="$scratch/render.tape"
+  cp "$ans" "$grid"
 
   local fs="$TC_FONT_SIZE" pad="$TC_PADDING"
   # Generous pixel size so the grid never wraps; `magick -trim` crops the slack.
@@ -101,10 +137,6 @@ render_ans() {
   local px_h=$(( rows * (fs * 130 / 100 + 1) + pad * 2 + 80 ))
   [ "$px_w" -lt 1000 ] && px_w=1000
   [ "$px_h" -lt 720  ] && px_h=720
-
-  local tape trash
-  tape="$(mktemp "${TMPDIR:-/tmp}/termclip-tape.XXXXXX")"
-  trash="$(mktemp "${TMPDIR:-/tmp}/termclip-gif.XXXXXX").gif"
 
   {
     printf 'Output "%s"\n' "$trash"
@@ -118,7 +150,7 @@ render_ans() {
     printf 'Hide\n'
     # clear wipes the typed command; `tput civis` + trailing `sleep` keep the
     # shell prompt and its input cursor from reappearing under the screenshot.
-    printf 'Type "PS1='\'''\'' PS2='\'''\'' PROMPT_COMMAND='\'''\''; clear; cat %s; tput civis 2>/dev/null; sleep 30"\n' "$ans"
+    printf 'Type "PS1='\'''\'' PS2='\'''\'' PROMPT_COMMAND='\'''\''; clear; cat %s; tput civis 2>/dev/null; sleep 30"\n' "$grid"
     printf 'Enter\n'
     printf 'Sleep 700ms\n'   # let the replay terminal paint the cat'd grid
     printf 'Show\n'
@@ -138,12 +170,12 @@ render_ans() {
   if [ ! -f "$out" ]; then
     info "vhs render failed for theme '$theme' after retries — diagnostics:"
     vhs "$tape" >&2 || true
-    rm -f "$tape" "$trash"
+    rm -rf "$scratch"
     die "render produced no PNG (theme=$theme). Is '$theme' a valid 'vhs themes' name?"
   fi
   if have magick; then magick "$out" -trim +repage "$out" 2>/dev/null || true
   elif have convert; then convert "$out" -trim +repage "$out" 2>/dev/null || true; fi
-  rm -f "$tape" "$trash"
+  rm -rf "$scratch"
 }
 
 # capture the current pane to an ANSI file (per-line reset prevents color bleed)
@@ -157,6 +189,7 @@ capture_pane() {
 render_themes() {
   # render_themes <ans_file> <out_prefix> <theme_sel> <cols> <rows>
   local ans="$1" prefix="$2" sel="$3" cols="$4" rows="$5"
+  case "$sel" in dark|light|both) ;; *) die "invalid --theme '$sel' (use dark|light|both)";; esac
   local made=()
   mkdir -p "$(dirname "$prefix")" 2>/dev/null || true
   if [ "$sel" = dark ] || [ "$sel" = both ]; then
@@ -167,7 +200,8 @@ render_themes() {
     render_ans "$ans" "${prefix}.light.png" "$TC_LIGHT_THEME" "$cols" "$rows"
     made+=("${prefix}.light.png")
   fi
-  printf '%s\n' "${made[@]}"
+  # bash 3.2-safe expansion of a possibly-empty array under `set -u`
+  printf '%s\n' ${made[@]+"${made[@]}"}
 }
 
 abspath() { case "$1" in /*) printf '%s' "$1";; *) printf '%s/%s' "$(pwd)" "$1";; esac; }
@@ -180,13 +214,14 @@ cmd_start() {
   local session="main" cols="$TC_COLS" rows="$TC_ROWS"; local -a rest=()
   while [ $# -gt 0 ]; do
     case "$1" in
-      -s|--session) session="$2"; shift 2;;
-      --cols) cols="$2"; shift 2;;
-      --rows) rows="$2"; shift 2;;
+      -s|--session) need_val "$#" "$1"; session="$2"; shift 2;;
+      --cols) need_val "$#" "$1"; cols="$2"; shift 2;;
+      --rows) need_val "$#" "$1"; rows="$2"; shift 2;;
       --) shift; rest=("$@"); break;;
       *) rest+=("$1"); shift;;
     esac
   done
+  valid_session "$session"
   [ "${#rest[@]}" -gt 0 ] || die "start: no command. Usage: termclip start [-s NAME] -- <command...>"
   session_exists "$session" && die "start: session '$session' already running (termclip stop -s $session)"
 
@@ -204,46 +239,46 @@ read_meta() {
   local m; m="$(smeta "$1")"
   COLS="$TC_COLS"; ROWS="$TC_ROWS"
   if [ -f "$m" ]; then
-    # shellcheck disable=SC1090
     local cols rows; cols="$(sed -n 's/^cols=//p' "$m")"; rows="$(sed -n 's/^rows=//p' "$m")"
     [ -n "$cols" ] && COLS="$cols"; [ -n "$rows" ] && ROWS="$rows"
   fi
 }
 
 cmd_type() {
-  ensure_core
+  ensure_tmux
   local session="main"
-  while [ $# -gt 0 ]; do case "$1" in -s|--session) session="$2"; shift 2;; *) break;; esac; done
+  while [ $# -gt 0 ]; do case "$1" in -s|--session) need_val "$#" "$1"; session="$2"; shift 2;; *) break;; esac; done
+  valid_session "$session"
   session_exists "$session" || die "type: no session '$session'"
   [ $# -gt 0 ] || die "type: nothing to type"
   tmuxc send-keys -t "$session" -l -- "$*"
 }
 
 cmd_key() {
-  ensure_core
+  ensure_tmux
   local session="main"
-  while [ $# -gt 0 ]; do case "$1" in -s|--session) session="$2"; shift 2;; *) break;; esac; done
+  while [ $# -gt 0 ]; do case "$1" in -s|--session) need_val "$#" "$1"; session="$2"; shift 2;; *) break;; esac; done
+  valid_session "$session"
   session_exists "$session" || die "key: no session '$session'"
   [ $# -gt 0 ] || die "key: no keys. e.g. termclip key Down Down Enter"
-  tmuxc send-keys -t "$session" "$@"
+  tmuxc send-keys -t "$session" -- "$@"
 }
 
 cmd_snap() {
   ensure_core
-  local session="main" sel="both" name="snap"
-  local settle_override=""
+  local session="main" sel="both" name="snap" settle_override=""
   local -a pos=()
   while [ $# -gt 0 ]; do
     case "$1" in
-      -s|--session) session="$2"; shift 2;;
-      --theme) sel="$2"; shift 2;;
-      --settle) settle_override="$2"; shift 2;;
-      --out) name="$2"; shift 2;;
+      -s|--session) need_val "$#" "$1"; session="$2"; shift 2;;
+      --theme)   need_val "$#" "$1"; sel="$2"; shift 2;;
+      --settle)  need_val "$#" "$1"; settle_override="$2"; shift 2;;
+      --out)     need_val "$#" "$1"; name="$2"; shift 2;;
       *) pos+=("$1"); shift;;
     esac
   done
-  [ "${#pos[@]}" -gt 0 ] && name="${pos[0]}"
-  case "$sel" in dark|light|both) ;; *) die "snap: --theme must be dark|light|both";; esac
+  [ "${#pos[@]}" -gt 0 ] && name="${pos[0]}"   # positional PREFIX wins over --out
+  valid_session "$session"
   session_exists "$session" || die "snap: no session '$session' (termclip start ... first)"
   [ -n "$settle_override" ] && TC_SETTLE_MS="$settle_override"
 
@@ -264,11 +299,11 @@ cmd_shot() {
   local -a rest=()
   while [ $# -gt 0 ]; do
     case "$1" in
-      --out) name="$2"; shift 2;;
-      --cols) cols="$2"; shift 2;;
-      --rows) rows="$2"; shift 2;;
-      --theme) sel="$2"; shift 2;;
-      --settle) settle="$2"; shift 2;;
+      --out)    need_val "$#" "$1"; name="$2"; shift 2;;
+      --cols)   need_val "$#" "$1"; cols="$2"; shift 2;;
+      --rows)   need_val "$#" "$1"; rows="$2"; shift 2;;
+      --theme)  need_val "$#" "$1"; sel="$2"; shift 2;;
+      --settle) need_val "$#" "$1"; settle="$2"; shift 2;;
       --) shift; rest=("$@"); break;;
       *) rest+=("$1"); shift;;
     esac
@@ -276,38 +311,37 @@ cmd_shot() {
   [ "${#rest[@]}" -gt 0 ] || die "shot: no command. Usage: termclip shot --out PREFIX -- <command...>"
 
   local session="_shot_$$"
+  # no suffix after XXXXXX: BSD/macOS mktemp rejects it; the extension is cosmetic
+  local tmpans; tmpans="$(mktemp "${TMPDIR:-/tmp}/termclip-shot.XXXXXX")"
+
   configure_server
   mkdir -p "$(sdir "$session")"
   tmuxc new-session -d -s "$session" -x "$cols" -y "$rows" \
         -e COLORTERM=truecolor -e TERM=tmux-256color "${rest[@]}"
   tmuxc set -t "$session" status off 2>/dev/null || true
-  # settle: give the program time to draw its first screen
-  _sleep_ms "$settle"
+  _sleep_ms "$settle"   # give the program time to draw its first screen
 
-  local ans; ans="$(sdir "$session")/last.ans"
-  capture_pane "$session" "$ans"
-  # copy the capture out before tearing down the (temporary) session dir
-  local tmpans; tmpans="$(mktemp "${TMPDIR:-/tmp}/termclip-ans.XXXXXX").ans"
-  cp "$ans" "$tmpans"
+  capture_pane "$session" "$tmpans"
+  # tear down the temporary session now that we have the capture
   tmuxc kill-session -t "$session" 2>/dev/null || true
   rm -rf "$(sdir "$session")" 2>/dev/null || true
 
   local prefix; prefix="$(abspath "${TC_OUT%/}/$name")"
   local out; out="$(render_themes "$tmpans" "$prefix" "$sel" "$cols" "$rows")"
-  rm -f "$tmpans" 2>/dev/null || true
+  rm -f "$tmpans"
   info "shot '${rest[*]}' -> ${sel} theme(s):"
   printf '%s\n' "$out"
 }
 
 cmd_render() {
-  ensure_core
+  ensure_vhs
   local cols="$TC_COLS" rows="$TC_ROWS" sel="both" name="render" file=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --out) name="$2"; shift 2;;
-      --cols) cols="$2"; shift 2;;
-      --rows) rows="$2"; shift 2;;
-      --theme) sel="$2"; shift 2;;
+      --out)   need_val "$#" "$1"; name="$2"; shift 2;;
+      --cols)  need_val "$#" "$1"; cols="$2"; shift 2;;
+      --rows)  need_val "$#" "$1"; rows="$2"; shift 2;;
+      --theme) need_val "$#" "$1"; sel="$2"; shift 2;;
       *) file="$1"; shift;;
     esac
   done
@@ -317,29 +351,34 @@ cmd_render() {
 }
 
 cmd_ls() {
-  ensure_core
-  if ! tmuxc list-sessions 2>/dev/null; then
-    info "no active termclip sessions"
-  fi
+  ensure_tmux
+  tmuxc list-sessions 2>/dev/null || info "no active termclip sessions"
 }
 
 cmd_stop() {
-  ensure_core
+  ensure_tmux
   local session="main" all=0
-  while [ $# -gt 0 ]; do case "$1" in -s|--session) session="$2"; shift 2;; --all) all=1; shift;; *) break;; esac; done
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -s|--session) need_val "$#" "$1"; session="$2"; shift 2;;
+      --all) all=1; shift;;
+      *) break;;
+    esac
+  done
   if [ "$all" = 1 ]; then
     tmuxc kill-server 2>/dev/null || true
     rm -rf "$TC_HOME" 2>/dev/null || true
     info "stopped all sessions"
     return
   fi
+  valid_session "$session"
   session_exists "$session" || { info "stop: no session '$session'"; return; }
   tmuxc kill-session -t "$session" 2>/dev/null || true
   rm -rf "$(sdir "$session")" 2>/dev/null || true
   info "stopped session '$session'"
 }
 
-cmd_help() { sed -n '3,55p' "$0" | sed 's/^# \{0,1\}//'; }
+cmd_help() { sed -n '3,42p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # ----------------------------------------------------------------------------
 # dispatch
