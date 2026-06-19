@@ -1,0 +1,362 @@
+#!/usr/bin/env bash
+#
+# termclip — faithful PNG screenshots of an interactive terminal / TUI,
+#            in both dark and light themes.
+#
+# Drives a PERSISTENT tmux session (its own isolated server socket) so an agent
+# can launch a command, type text, send keys, and snapshot the rendered screen
+# on demand. Each snapshot is replayed through VHS under a real terminal theme,
+# so colors, bold/italic/underline, 256-color, truecolor and box-drawing are
+# pixel-faithful — and the SAME captured screen is rendered under a dark AND a
+# light palette (default foreground/background and the 16 ANSI colors flip
+# correctly per theme).
+#
+# Pipeline:  tmux capture-pane -p -e  ->  VHS replay (themed)  ->  trim  ->  PNG
+#
+# Usage:
+#   termclip start  [-s NAME] [--cols N] [--rows N] -- <command...>
+#   termclip type   [-s NAME] "<text>"          # type literal text (no Enter)
+#   termclip key    [-s NAME] <Key> [Key...]    # send keys: Enter Up Down Escape C-c Tab ...
+#   termclip snap   [-s NAME] [NAME_OR_PREFIX] [--theme dark|light|both] [--settle MS]
+#   termclip shot   [--out PREFIX] [--cols N] [--rows N] [--settle MS] -- <command...>
+#   termclip render <file.ans> [--out PREFIX] [--theme ...] [--cols N] [--rows N]
+#   termclip ls
+#   termclip stop   [-s NAME]
+#   termclip help
+#
+# Env overrides:
+#   TERMCLIP_DARK_THEME   (default "Catppuccin Mocha")   — any `vhs themes` name
+#   TERMCLIP_LIGHT_THEME  (default "Catppuccin Latte")
+#   TERMCLIP_FONT_SIZE    (default 22)
+#   TERMCLIP_FONT_FAMILY  (default: VHS default, JetBrains Mono)
+#   TERMCLIP_PADDING      (default 24)
+#   TERMCLIP_COLS / TERMCLIP_ROWS  (default 100 / 30) — session geometry
+#   TERMCLIP_SETTLE_MS    (default 500) — wait after a key before capturing
+#   TERMCLIP_OUT          (default ".") — directory for snap/shot output PNGs
+#   TERMCLIP_SOCKET       (default "termclip") — isolated tmux server socket
+#   TERMCLIP_HOME         (default "$TMPDIR/termclip") — session state dir
+#
+set -euo pipefail
+
+# ----------------------------------------------------------------------------
+# config
+# ----------------------------------------------------------------------------
+TC_SOCKET="${TERMCLIP_SOCKET:-termclip}"
+TC_HOME="${TERMCLIP_HOME:-${TMPDIR:-/tmp}/termclip}"
+TC_DARK_THEME="${TERMCLIP_DARK_THEME:-Catppuccin Mocha}"
+TC_LIGHT_THEME="${TERMCLIP_LIGHT_THEME:-Catppuccin Latte}"
+TC_FONT_SIZE="${TERMCLIP_FONT_SIZE:-22}"
+TC_FONT_FAMILY="${TERMCLIP_FONT_FAMILY:-}"
+TC_PADDING="${TERMCLIP_PADDING:-24}"
+TC_COLS="${TERMCLIP_COLS:-100}"
+TC_ROWS="${TERMCLIP_ROWS:-30}"
+TC_SETTLE_MS="${TERMCLIP_SETTLE_MS:-500}"
+TC_OUT="${TERMCLIP_OUT:-.}"
+
+RESET="$(printf '\033[0m')"
+
+tmuxc() { tmux -L "$TC_SOCKET" "$@"; }
+die()   { printf 'termclip: %s\n' "$*" >&2; exit 1; }
+info()  { printf 'termclip: %s\n' "$*" >&2; }
+have()  { command -v "$1" >/dev/null 2>&1; }
+_sleep_ms() { perl -e "select(undef,undef,undef,$1/1000)" 2>/dev/null || sleep "$(awk "BEGIN{printf \"%.3f\", $1/1000}")"; }
+
+ensure_core() {
+  have tmux || die "missing dependency: tmux  (brew install tmux)"
+  have vhs  || die "missing dependency: vhs   (brew install vhs)"
+}
+
+sdir()  { printf '%s/%s' "$TC_HOME" "$1"; }   # per-session state dir
+smeta() { printf '%s/%s/meta' "$TC_HOME" "$1"; }
+
+session_exists() { tmuxc has-session -t "$1" 2>/dev/null; }
+
+# ----------------------------------------------------------------------------
+# tmux server / session setup
+# ----------------------------------------------------------------------------
+configure_server() {
+  # Isolated tmux server: truecolor + no status bar, so capture-pane preserves
+  # full color and the pane uses the full geometry.
+  tmuxc set -g default-terminal "tmux-256color" 2>/dev/null || true
+  tmuxc set -as terminal-features ",*:RGB"       2>/dev/null || true
+  tmuxc set -ga terminal-overrides ",*:Tc"       2>/dev/null || true
+  tmuxc set -g  status off                        2>/dev/null || true
+  tmuxc set -g  remain-on-exit on                 2>/dev/null || true
+}
+
+# ----------------------------------------------------------------------------
+# the renderer: ANSI capture file -> themed, trimmed PNG
+# ----------------------------------------------------------------------------
+render_ans() {
+  # render_ans <ans_file> <out_png> <theme> <cols> <rows>
+  local ans="$1" out="$2" theme="$3" cols="$4" rows="$5"
+  [ -f "$ans" ] || die "render: no such ANSI file: $ans"
+  case "$ans" in *" "*) die "render: ANSI path must not contain spaces: $ans";; esac
+
+  local fs="$TC_FONT_SIZE" pad="$TC_PADDING"
+  # Generous pixel size so the grid never wraps; `magick -trim` crops the slack.
+  # A floor is enforced because VHS's headless screenshot is unreliable on small
+  # canvases; oversizing is harmless since we trim afterwards.
+  local px_w=$(( cols * (fs * 65 / 100 + 1) + pad * 2 + 80 ))
+  local px_h=$(( rows * (fs * 130 / 100 + 1) + pad * 2 + 80 ))
+  [ "$px_w" -lt 1000 ] && px_w=1000
+  [ "$px_h" -lt 720  ] && px_h=720
+
+  local tape trash
+  tape="$(mktemp "${TMPDIR:-/tmp}/termclip-tape.XXXXXX")"
+  trash="$(mktemp "${TMPDIR:-/tmp}/termclip-gif.XXXXXX").gif"
+
+  {
+    printf 'Output "%s"\n' "$trash"
+    printf 'Set Shell "bash"\n'
+    printf 'Set Theme "%s"\n' "$theme"
+    [ -n "$TC_FONT_FAMILY" ] && printf 'Set FontFamily "%s"\n' "$TC_FONT_FAMILY"
+    printf 'Set FontSize %s\n' "$fs"
+    printf 'Set Padding %s\n' "$pad"
+    printf 'Set Width %s\n'  "$px_w"
+    printf 'Set Height %s\n' "$px_h"
+    printf 'Hide\n'
+    # clear wipes the typed command; `tput civis` + trailing `sleep` keep the
+    # shell prompt and its input cursor from reappearing under the screenshot.
+    printf 'Type "PS1='\'''\'' PS2='\'''\'' PROMPT_COMMAND='\'''\''; clear; cat %s; tput civis 2>/dev/null; sleep 30"\n' "$ans"
+    printf 'Enter\n'
+    printf 'Sleep 700ms\n'   # let the replay terminal paint the cat'd grid
+    printf 'Show\n'
+    printf 'Sleep 700ms\n'   # let the recording stabilize before the screenshot
+    printf 'Screenshot "%s"\n' "$out"
+  } > "$tape"
+
+  # VHS's headless Screenshot is timing-flaky: it can exit 0 yet write no file.
+  # Retry until a PNG lands.
+  rm -f "$out"
+  for _ in 1 2 3 4; do
+    vhs "$tape" >/dev/null 2>&1 || true
+    [ -f "$out" ] && break
+    _sleep_ms 300
+  done
+
+  if [ ! -f "$out" ]; then
+    info "vhs render failed for theme '$theme' after retries — diagnostics:"
+    vhs "$tape" >&2 || true
+    rm -f "$tape" "$trash"
+    die "render produced no PNG (theme=$theme). Is '$theme' a valid 'vhs themes' name?"
+  fi
+  if have magick; then magick "$out" -trim +repage "$out" 2>/dev/null || true
+  elif have convert; then convert "$out" -trim +repage "$out" 2>/dev/null || true; fi
+  rm -f "$tape" "$trash"
+}
+
+# capture the current pane to an ANSI file (per-line reset prevents color bleed)
+capture_pane() {
+  # capture_pane <session> <ans_out>
+  local session="$1" ans="$2"
+  tmuxc capture-pane -t "$session" -p -e | sed "s/\$/${RESET}/" > "$ans"
+}
+
+# render an ANSI file into the requested theme(s); echo the produced paths
+render_themes() {
+  # render_themes <ans_file> <out_prefix> <theme_sel> <cols> <rows>
+  local ans="$1" prefix="$2" sel="$3" cols="$4" rows="$5"
+  local made=()
+  mkdir -p "$(dirname "$prefix")" 2>/dev/null || true
+  if [ "$sel" = dark ] || [ "$sel" = both ]; then
+    render_ans "$ans" "${prefix}.dark.png" "$TC_DARK_THEME" "$cols" "$rows"
+    made+=("${prefix}.dark.png")
+  fi
+  if [ "$sel" = light ] || [ "$sel" = both ]; then
+    render_ans "$ans" "${prefix}.light.png" "$TC_LIGHT_THEME" "$cols" "$rows"
+    made+=("${prefix}.light.png")
+  fi
+  printf '%s\n' "${made[@]}"
+}
+
+abspath() { case "$1" in /*) printf '%s' "$1";; *) printf '%s/%s' "$(pwd)" "$1";; esac; }
+
+# ----------------------------------------------------------------------------
+# subcommands
+# ----------------------------------------------------------------------------
+cmd_start() {
+  ensure_core
+  local session="main" cols="$TC_COLS" rows="$TC_ROWS"; local -a rest=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -s|--session) session="$2"; shift 2;;
+      --cols) cols="$2"; shift 2;;
+      --rows) rows="$2"; shift 2;;
+      --) shift; rest=("$@"); break;;
+      *) rest+=("$1"); shift;;
+    esac
+  done
+  [ "${#rest[@]}" -gt 0 ] || die "start: no command. Usage: termclip start [-s NAME] -- <command...>"
+  session_exists "$session" && die "start: session '$session' already running (termclip stop -s $session)"
+
+  configure_server
+  mkdir -p "$(sdir "$session")"
+  printf 'cols=%s\nrows=%s\n' "$cols" "$rows" > "$(smeta "$session")"
+  tmuxc new-session -d -s "$session" -x "$cols" -y "$rows" \
+        -e COLORTERM=truecolor -e TERM=tmux-256color "${rest[@]}"
+  tmuxc set -t "$session" status off 2>/dev/null || true
+  info "started session '$session' (${cols}x${rows}): ${rest[*]}"
+}
+
+read_meta() {
+  # read_meta <session> -> sets COLS/ROWS globals
+  local m; m="$(smeta "$1")"
+  COLS="$TC_COLS"; ROWS="$TC_ROWS"
+  if [ -f "$m" ]; then
+    # shellcheck disable=SC1090
+    local cols rows; cols="$(sed -n 's/^cols=//p' "$m")"; rows="$(sed -n 's/^rows=//p' "$m")"
+    [ -n "$cols" ] && COLS="$cols"; [ -n "$rows" ] && ROWS="$rows"
+  fi
+}
+
+cmd_type() {
+  ensure_core
+  local session="main"
+  while [ $# -gt 0 ]; do case "$1" in -s|--session) session="$2"; shift 2;; *) break;; esac; done
+  session_exists "$session" || die "type: no session '$session'"
+  [ $# -gt 0 ] || die "type: nothing to type"
+  tmuxc send-keys -t "$session" -l -- "$*"
+}
+
+cmd_key() {
+  ensure_core
+  local session="main"
+  while [ $# -gt 0 ]; do case "$1" in -s|--session) session="$2"; shift 2;; *) break;; esac; done
+  session_exists "$session" || die "key: no session '$session'"
+  [ $# -gt 0 ] || die "key: no keys. e.g. termclip key Down Down Enter"
+  tmuxc send-keys -t "$session" "$@"
+}
+
+cmd_snap() {
+  ensure_core
+  local session="main" sel="both" name="snap"
+  local settle_override=""
+  local -a pos=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -s|--session) session="$2"; shift 2;;
+      --theme) sel="$2"; shift 2;;
+      --settle) settle_override="$2"; shift 2;;
+      --out) name="$2"; shift 2;;
+      *) pos+=("$1"); shift;;
+    esac
+  done
+  [ "${#pos[@]}" -gt 0 ] && name="${pos[0]}"
+  case "$sel" in dark|light|both) ;; *) die "snap: --theme must be dark|light|both";; esac
+  session_exists "$session" || die "snap: no session '$session' (termclip start ... first)"
+  [ -n "$settle_override" ] && TC_SETTLE_MS="$settle_override"
+
+  read_meta "$session"
+  _sleep_ms "$TC_SETTLE_MS"   # let the live program redraw after the last key
+  local ans; ans="$(sdir "$session")/last.ans"
+  capture_pane "$session" "$ans"
+
+  local prefix; prefix="$(abspath "${TC_OUT%/}/$name")"
+  local out; out="$(render_themes "$ans" "$prefix" "$sel" "$COLS" "$ROWS")"
+  info "captured session '$session' -> ${sel} theme(s):"
+  printf '%s\n' "$out"
+}
+
+cmd_shot() {
+  ensure_core
+  local cols="$TC_COLS" rows="$TC_ROWS" sel="both" name="shot" settle="$TC_SETTLE_MS"
+  local -a rest=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --out) name="$2"; shift 2;;
+      --cols) cols="$2"; shift 2;;
+      --rows) rows="$2"; shift 2;;
+      --theme) sel="$2"; shift 2;;
+      --settle) settle="$2"; shift 2;;
+      --) shift; rest=("$@"); break;;
+      *) rest+=("$1"); shift;;
+    esac
+  done
+  [ "${#rest[@]}" -gt 0 ] || die "shot: no command. Usage: termclip shot --out PREFIX -- <command...>"
+
+  local session="_shot_$$"
+  configure_server
+  mkdir -p "$(sdir "$session")"
+  tmuxc new-session -d -s "$session" -x "$cols" -y "$rows" \
+        -e COLORTERM=truecolor -e TERM=tmux-256color "${rest[@]}"
+  tmuxc set -t "$session" status off 2>/dev/null || true
+  # settle: give the program time to draw its first screen
+  _sleep_ms "$settle"
+
+  local ans; ans="$(sdir "$session")/last.ans"
+  capture_pane "$session" "$ans"
+  # copy the capture out before tearing down the (temporary) session dir
+  local tmpans; tmpans="$(mktemp "${TMPDIR:-/tmp}/termclip-ans.XXXXXX").ans"
+  cp "$ans" "$tmpans"
+  tmuxc kill-session -t "$session" 2>/dev/null || true
+  rm -rf "$(sdir "$session")" 2>/dev/null || true
+
+  local prefix; prefix="$(abspath "${TC_OUT%/}/$name")"
+  local out; out="$(render_themes "$tmpans" "$prefix" "$sel" "$cols" "$rows")"
+  rm -f "$tmpans" 2>/dev/null || true
+  info "shot '${rest[*]}' -> ${sel} theme(s):"
+  printf '%s\n' "$out"
+}
+
+cmd_render() {
+  ensure_core
+  local cols="$TC_COLS" rows="$TC_ROWS" sel="both" name="render" file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --out) name="$2"; shift 2;;
+      --cols) cols="$2"; shift 2;;
+      --rows) rows="$2"; shift 2;;
+      --theme) sel="$2"; shift 2;;
+      *) file="$1"; shift;;
+    esac
+  done
+  [ -n "$file" ] && [ -f "$file" ] || die "render: need an existing ANSI file. Usage: termclip render <file.ans> [--out PREFIX]"
+  local prefix; prefix="$(abspath "${TC_OUT%/}/$name")"
+  render_themes "$file" "$prefix" "$sel" "$cols" "$rows"
+}
+
+cmd_ls() {
+  ensure_core
+  if ! tmuxc list-sessions 2>/dev/null; then
+    info "no active termclip sessions"
+  fi
+}
+
+cmd_stop() {
+  ensure_core
+  local session="main" all=0
+  while [ $# -gt 0 ]; do case "$1" in -s|--session) session="$2"; shift 2;; --all) all=1; shift;; *) break;; esac; done
+  if [ "$all" = 1 ]; then
+    tmuxc kill-server 2>/dev/null || true
+    rm -rf "$TC_HOME" 2>/dev/null || true
+    info "stopped all sessions"
+    return
+  fi
+  session_exists "$session" || { info "stop: no session '$session'"; return; }
+  tmuxc kill-session -t "$session" 2>/dev/null || true
+  rm -rf "$(sdir "$session")" 2>/dev/null || true
+  info "stopped session '$session'"
+}
+
+cmd_help() { sed -n '3,55p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# ----------------------------------------------------------------------------
+# dispatch
+# ----------------------------------------------------------------------------
+main() {
+  local sub="${1:-help}"; shift || true
+  case "$sub" in
+    start)  cmd_start  "$@";;
+    type)   cmd_type   "$@";;
+    key)    cmd_key    "$@";;
+    snap)   cmd_snap   "$@";;
+    shot)   cmd_shot   "$@";;
+    render) cmd_render "$@";;
+    ls)     cmd_ls     "$@";;
+    stop)   cmd_stop   "$@";;
+    help|-h|--help) cmd_help;;
+    *) die "unknown subcommand '$sub' (try: termclip help)";;
+  esac
+}
+main "$@"

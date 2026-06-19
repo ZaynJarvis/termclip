@@ -1,0 +1,14 @@
+# VHS / capture artifacts
+*.gif
+*.ans
+*.tape
+
+# OS / editor
+.DS_Store
+*.swp
+
+# local snapshot output (examples/ is committed on purpose)
+/out/
+*.dark.png
+*.light.png
+!examples/*.png
