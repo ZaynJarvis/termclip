@@ -36,20 +36,29 @@ are both faithful**. Capture, look, type more, capture again.
 
 ## Install
 
-Requirements: **`tmux`** and **`vhs`** (required); **ImageMagick** (`magick`/`convert`,
-optional — used to trim the image to content).
+Runtime deps: **`tmux`** ≥ 3.2 and **`vhs`** (required); **ImageMagick** (`magick`/`convert`,
+optional — trims the image to content). On macOS: `brew install tmux vhs imagemagick`.
+
+### As an agent skill (recommended)
+
+This repo *is* a skill (`SKILL.md` at the root), installable with
+[`npx skills`](https://github.com/vercel-labs/skills) — works for Claude Code, Codex,
+Cursor, OpenCode and more:
 
 ```bash
-# macOS
-brew install tmux vhs imagemagick
-
-# clone + put `termclip` on your PATH
-git clone https://github.com/ZaynJarvis/termclip.git
-cd termclip
-./install.sh          # installs deps if missing, links `termclip`, installs the Claude skill
+npx skills add ZaynJarvis/termclip --agent claude-code -g   # global: ~/.claude/skills/
+# drop -g to install into ./.claude/skills/ for the current project
 ```
 
-Or just run the script directly: `./skill/bin/termclip help`.
+### As a CLI
+
+```bash
+git clone https://github.com/ZaynJarvis/termclip.git
+cd termclip
+./install.sh            # installs deps if missing, links `termclip` onto your PATH
+# …or just run it in place:
+./bin/termclip help
+```
 
 ## Quickstart
 
@@ -133,13 +142,13 @@ truecolor stays absolute. Full internals, env vars, and troubleshooting in
 
 ## Use as a Claude Code / AI agent skill
 
-This repo *is* a [Claude Code skill](https://docs.claude.com/en/docs/claude-code/skills).
-Install it so an agent can take terminal screenshots inside its loop:
+The repo root is a [Claude Code skill](https://docs.claude.com/en/docs/claude-code/skills)
+(`SKILL.md` + bundled `bin/termclip` + `reference.md`). Install it so an agent can take
+terminal screenshots inside its loop:
 
 ```bash
-./install.sh
-# or manually:
-cp -r skill ~/.claude/skills/termclip
+npx skills add ZaynJarvis/termclip --agent claude-code -g
+# or, from a clone:  cp SKILL.md reference.md ~/.claude/skills/termclip/ && cp -r bin ~/.claude/skills/termclip/
 ```
 
 The agent then captures a screen, **reads the PNG to see it**, sends more keys, and captures
