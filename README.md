@@ -67,6 +67,8 @@ cd termclip
 termclip shot --out hero --cols 100 --rows 40 --settle 3000 -- ov config
 #   -> hero.dark.png   hero.light.png
 ```
+For non-interactive command output, `shot` captures the temporary session's scrollback
+and grows the render to fit the captured ANSI grid. `--cols` still controls wrapping.
 
 ### Live — drive the program and snapshot any screen
 ```bash
@@ -98,7 +100,7 @@ Every `snap`/`shot` prints the PNG paths it wrote — open them, or (for an agen
 | `type -s NAME "<text>"` | Type literal text into the session (no Enter) |
 | `key -s NAME <Key>...` | Send keys (`Enter Up Down Left Right Escape Tab Space C-c BSpace F1`…) |
 | `snap -s NAME [PREFIX] [--theme dark\|light\|both] [--settle MS]` | Snapshot the current screen → PNG(s) |
-| `shot --out PREFIX [--cols N --rows N --settle MS] -- <cmd...>` | `start → settle → snap both → stop`, in one call |
+| `shot --out PREFIX [--cols N --rows N --settle MS] -- <cmd...>` | `start → settle → capture scrollback → render both → stop`, in one call |
 | `render <file.ans> [--out PREFIX] [--theme ...] [--cols N --rows N]` | Render a raw `tmux capture-pane -e` dump to PNG(s) |
 | `ls` | List active sessions |
 | `stop -s NAME` · `stop --all` | Kill a session / kill everything and clean state |
@@ -134,10 +136,12 @@ TERMCLIP_DARK_THEME="Dracula" TERMCLIP_LIGHT_THEME="Github" \
 ```
 
 A detached tmux session (on its own socket, so it never touches your tmux) holds the live
-program. Each snapshot grabs the visible grid *with* ANSI escapes, then replays it inside a
-headless VHS terminal under a real theme and screenshots it. Because VHS applies a full
-palette, both the **default fg/bg flip** and the **16‑color remap** happen per theme, while
-truecolor stays absolute. Full internals, env vars, and troubleshooting in
+program. Live `snap` grabs the visible grid *with* ANSI escapes; one-shot `shot` grabs the
+temporary session scrollback so long command output is not lost. The renderer sizes the
+VHS canvas from the captured ANSI grid, replays it inside a headless terminal under a real
+theme, and screenshots it. Because VHS applies a full palette, both the **default fg/bg
+flip** and the **16‑color remap** happen per theme, while truecolor stays absolute. Full
+internals, env vars, and troubleshooting in
 [`skills/termclip/reference.md`](skills/termclip/reference.md).
 
 ## Use as a Claude Code / AI agent skill

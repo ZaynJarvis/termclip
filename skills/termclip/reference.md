@@ -23,13 +23,16 @@ Internals, every knob, and troubleshooting. For day‑to‑day usage see `SKILL.
 2. **Interaction.** `type` sends literal text (`tmux send-keys -l`); `key` sends named
    keys (`tmux send-keys Down Enter …`). The program redraws in the live pane.
 3. **Capture.** `snap` waits `--settle` ms (so the program finishes redrawing), then
-   `tmux capture-pane -p -e` dumps the visible grid *with* SGR escapes. A per‑line
-   reset (`\e[0m`) is appended to prevent color bleeding between rows.
+   `tmux capture-pane -p -e` dumps the visible grid *with* SGR escapes. `shot` uses
+   `capture-pane -S -` in its temporary session so long command output in scrollback is
+   not lost. A per‑line reset (`\e[0m`) is appended to prevent color bleeding between
+   rows.
 4. **Themed render.** The captured grid is replayed inside a headless VHS terminal —
    `clear; cat grid.ans` under a real **theme** — and screenshotted. Running it under a
    dark theme and a light theme produces the two PNGs. Because VHS applies a full
    terminal palette, the **default foreground/background flip** and the **16 ANSI
-   colors are remapped** per theme (truecolor stays absolute, which is correct).
+   colors are remapped** per theme (truecolor stays absolute, which is correct). The VHS
+   canvas grows to the captured ANSI grid's line count and max line width before trimming.
 5. **Trim.** `magick -trim` crops the render down to the content (the canvas is
    intentionally oversized for reliability, then trimmed).
 
@@ -83,9 +86,11 @@ termclip key -s s Enter
 ```
 
 ## Capturing tall / wide screens
-The capture reflects a terminal of exactly `--cols`×`--rows`. If a TUI's header or list
-is taller than the rows, increase `--rows` (e.g. `--rows 45`). Width rarely needs
-changing; `--cols 120` for very wide tables.
+Live `snap` reflects a terminal of exactly `--cols`×`--rows`. If a TUI's header or list
+is taller than the rows, increase `--rows` (e.g. `--rows 45`). One-shot `shot` keeps the
+temporary session scrollback and expands the output image for long command output; use
+`--cols` to control where that output wraps. Width rarely needs changing; use `--cols 120`
+for very wide tables.
 
 ## Safety in destructive TUIs
 termclip just relays keys — it has no idea which screens mutate state. When screenshotting
@@ -100,7 +105,8 @@ and never send `Enter` on a "Save"/"Delete"/"Yes" confirmation unless you mean i
 - **Colors look wrong / washed out** — the source program may emit truecolor that is
   theme‑independent by design; that's expected (truecolor doesn't flip with the theme).
 - **Blank or partial capture** — increase `--settle` (the program hadn't finished drawing).
-- **Right edge of wide lines cut** — increase `--cols` on `start`/`shot`.
+- **Right edge of wide lines cut** — increase `--cols` on `start`/`shot`; the renderer
+  expands to captured line width, but the source terminal still wraps at `--cols`.
 - **A stray block where the cursor would be** — fixed in the renderer (cursor is hidden
   and no shell prompt is shown); if you see one, you're on an old build.
 - **Leftover sessions** — `termclip ls` to inspect, `termclip stop --all` to clean up.

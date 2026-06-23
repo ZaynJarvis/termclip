@@ -130,6 +130,15 @@ render_ans() {
   cp "$ans" "$grid"
 
   local fs="$TC_FONT_SIZE" pad="$TC_PADDING"
+  local measured measured_cols measured_rows
+  measured="$(ansi_grid_size "$grid")"
+  measured_cols="${measured%% *}"
+  measured_rows="${measured##* }"
+  case "$measured_cols" in ''|*[!0-9]*) measured_cols=0;; esac
+  case "$measured_rows" in ''|*[!0-9]*) measured_rows=0;; esac
+  [ "$measured_cols" -gt "$cols" ] && cols="$measured_cols"
+  [ "$measured_rows" -gt "$rows" ] && rows="$measured_rows"
+
   # Generous pixel size so the grid never wraps; `magick -trim` crops the slack.
   # A floor is enforced because VHS's headless screenshot is unreliable on small
   # canvases; oversizing is harmless since we trim afterwards.
@@ -180,9 +189,44 @@ render_ans() {
 
 # capture the current pane to an ANSI file (per-line reset prevents color bleed)
 capture_pane() {
-  # capture_pane <session> <ans_out>
-  local session="$1" ans="$2"
-  tmuxc capture-pane -t "$session" -p -e | sed "s/\$/${RESET}/" > "$ans"
+  # capture_pane <session> <ans_out> [screen|history]
+  local session="$1" ans="$2" mode="${3:-screen}"
+  case "$mode" in
+    screen)  tmuxc capture-pane -t "$session" -p -e;;
+    history) tmuxc capture-pane -t "$session" -p -e -S - | trim_ansi_blank_tail;;
+    *) die "capture_pane: invalid mode '$mode'";;
+  esac | sed "s/\$/${RESET}/" > "$ans"
+}
+
+trim_ansi_blank_tail() {
+  perl -ne '
+    push @lines, $_;
+    END {
+      while (@lines) {
+        my $s = $lines[-1];
+        $s =~ s/\e\][^\a]*(?:\a|\e\\)//g;
+        $s =~ s/\e\[[0-?]*[ -\/]*[@-~]//g;
+        $s =~ s/[[:space:]]//g;
+        last if length $s;
+        pop @lines;
+      }
+      print @lines;
+    }
+  '
+}
+
+ansi_grid_size() {
+  # ansi_grid_size <ans_file> -> "<cols> <rows>"
+  perl -MText::Tabs -CS -ne '
+    s/\e\][^\a]*(?:\a|\e\\)//g;
+    s/\e\[[0-?]*[ -\/]*[@-~]//g;
+    $_ = expand($_);
+    chomp;
+    $rows++;
+    my $len = length($_);
+    $cols = $len if $len > $cols;
+    END { print (($cols || 0) . " " . ($rows || 0) . "\n") }
+  ' "$1"
 }
 
 # render an ANSI file into the requested theme(s); echo the produced paths
@@ -321,7 +365,7 @@ cmd_shot() {
   tmuxc set -t "$session" status off 2>/dev/null || true
   _sleep_ms "$settle"   # give the program time to draw its first screen
 
-  capture_pane "$session" "$tmpans"
+  capture_pane "$session" "$tmpans" history
   # tear down the temporary session now that we have the capture
   tmuxc kill-session -t "$session" 2>/dev/null || true
   rm -rf "$(sdir "$session")" 2>/dev/null || true

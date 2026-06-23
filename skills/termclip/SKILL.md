@@ -49,6 +49,11 @@ termclip shot --out hero --cols 100 --rows 40 --settle 3000 -- ov config
 #   -> ./hero.dark.png  ./hero.light.png
 ```
 
+For non-interactive command output, `shot` captures the temporary session's scrollback
+and grows the render to fit the captured ANSI grid. `--cols` still controls wrapping.
+For a full-screen TUI viewport, prefer `start` + `snap`, where `--cols`/`--rows` are the
+screen size you want to inspect.
+
 After any `snap`/`shot`, **Read the printed `.dark.png` / `.light.png` paths** to see the result.
 
 ## Command reference
@@ -58,7 +63,7 @@ After any `snap`/`shot`, **Read the printed `.dark.png` / `.light.png` paths** t
 | `type -s NAME "<text>"` | Type literal text (no Enter) |
 | `key  -s NAME <Key>...` | Send keys: `Enter Up Down Left Right Escape Tab Space C-c BSpace` etc. |
 | `snap -s NAME [PREFIX] [--theme dark\|light\|both] [--settle MS]` | Snapshot current screen → PNG(s) |
-| `shot --out PREFIX [--cols N --rows N --settle MS] -- <cmd...>` | start → settle → snap both → stop, in one call |
+| `shot --out PREFIX [--cols N --rows N --settle MS] -- <cmd...>` | start → settle → capture scrollback → render both → stop, in one call |
 | `render <file.ans> [--out PREFIX] [--theme ...]` | Render a raw `tmux capture-pane -e` dump to PNG(s) |
 | `ls` | List active sessions |
 | `stop -s NAME` / `stop --all` | Kill a session / all sessions + clean state |
@@ -71,7 +76,8 @@ After any `snap`/`shot`, **Read the printed `.dark.png` / `.light.png` paths** t
 - **`--settle MS`** is the wait *before* capturing — give slow/animated TUIs time to redraw
   (use ~3000ms for a program's first screen if it probes a server/network).
 - **Geometry**: `--cols`/`--rows` set the terminal size. Tall TUIs need more rows (`--rows 40`);
-  the capture shows exactly what a terminal of that size would show.
+  `snap` shows exactly what a terminal of that size would show. `shot` keeps command
+  scrollback and expands the image for long output.
 - **Sending keys**: named keys go through `key` (passed straight to `tmux send-keys`),
   literal text goes through `type`. Combine in any order.
 - **Be careful in destructive TUIs**: navigate with arrows and back out with `Escape`/`C-c`;
