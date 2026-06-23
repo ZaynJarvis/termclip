@@ -7,7 +7,8 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN_SRC="$REPO/bin/termclip"
+SKILL_SRC="$REPO/skills/termclip"
+BIN_SRC="$SKILL_SRC/bin/termclip"
 
 say()  { printf '\033[36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m!!\033[0m %s\n'  "$*" >&2; }
@@ -39,11 +40,11 @@ ln -sf "$BIN_SRC" "$BIN_DIR/termclip"
 say "linked CLI: $BIN_DIR/termclip -> $BIN_SRC"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) warn "add $BIN_DIR to your PATH to use \`termclip\` directly";; esac
 
-# 3) install the skill (slim copy: just the skill files, not the whole repo) -
+# 3) install the skill into ~/.claude/skills (slim: just the skill dir) -------
 SKILL_DST="$HOME/.claude/skills/termclip"
-if mkdir -p "$SKILL_DST/bin" 2>/dev/null; then
-  cp "$REPO/SKILL.md" "$REPO/reference.md" "$SKILL_DST/"
-  cp "$BIN_SRC" "$SKILL_DST/bin/termclip"; chmod +x "$SKILL_DST/bin/termclip"
+if mkdir -p "$SKILL_DST" 2>/dev/null; then
+  cp -R "$SKILL_SRC/." "$SKILL_DST/"
+  chmod +x "$SKILL_DST/bin/termclip"
   say "installed skill: $SKILL_DST"
 else
   warn "could not write ~/.claude/skills — install the skill with: npx skills add ZaynJarvis/termclip --agent claude-code -g"

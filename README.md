@@ -41,7 +41,7 @@ optional — trims the image to content). On macOS: `brew install tmux vhs image
 
 ### As an agent skill (recommended)
 
-This repo *is* a skill (`SKILL.md` at the root), installable with
+This repo ships the skill at [`skills/termclip/`](skills/termclip), installable with
 [`npx skills`](https://github.com/vercel-labs/skills) — works for Claude Code, Codex,
 Cursor, OpenCode and more:
 
@@ -57,7 +57,7 @@ git clone https://github.com/ZaynJarvis/termclip.git
 cd termclip
 ./install.sh            # installs deps if missing, links `termclip` onto your PATH
 # …or just run it in place:
-./bin/termclip help
+./skills/termclip/bin/termclip help
 ```
 
 ## Quickstart
@@ -138,17 +138,18 @@ program. Each snapshot grabs the visible grid *with* ANSI escapes, then replays 
 headless VHS terminal under a real theme and screenshots it. Because VHS applies a full
 palette, both the **default fg/bg flip** and the **16‑color remap** happen per theme, while
 truecolor stays absolute. Full internals, env vars, and troubleshooting in
-[`skill/reference.md`](skill/reference.md).
+[`skills/termclip/reference.md`](skills/termclip/reference.md).
 
 ## Use as a Claude Code / AI agent skill
 
-The repo root is a [Claude Code skill](https://docs.claude.com/en/docs/claude-code/skills)
-(`SKILL.md` + bundled `bin/termclip` + `reference.md`). Install it so an agent can take
+The skill lives at [`skills/termclip/`](skills/termclip) — a [Claude Code skill](https://docs.claude.com/en/docs/claude-code/skills)
+(`SKILL.md` + bundled `bin/termclip` + `reference.md`). `npx skills` installs just that
+directory (the README/examples stay here in the repo). Install it so an agent can take
 terminal screenshots inside its loop:
 
 ```bash
 npx skills add ZaynJarvis/termclip --agent claude-code -g
-# or, from a clone:  cp SKILL.md reference.md ~/.claude/skills/termclip/ && cp -r bin ~/.claude/skills/termclip/
+# or, from a clone:  cp -R skills/termclip ~/.claude/skills/termclip
 ```
 
 The agent then captures a screen, **reads the PNG to see it**, sends more keys, and captures
